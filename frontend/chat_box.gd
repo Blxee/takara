@@ -19,4 +19,4 @@ func _on_text_submitted(new_text: String) -> void:
 	%LineEdit.grab_focus()
 
 	if socket.get_ready_state() == socket.STATE_OPEN:
-		socket.send_text(new_text)
+		socket.send_text('%s: %s' % [%NameEdit.text, new_text])
