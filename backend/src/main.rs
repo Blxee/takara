@@ -12,9 +12,8 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    join,
     net::TcpListener,
-    spawn,
+    select, spawn,
     sync::{Mutex, mpsc},
     time::sleep,
 };
@@ -32,6 +31,14 @@ impl Room {
             _ => panic!(),
         }
     }
+
+    fn disconnect(&mut self, id: u32) {
+        match id {
+            0 => self.player_a.take(),
+            1 => self.player_b.take(),
+            _ => panic!(),
+        };
+    }
 }
 
 type GameState = Arc<Mutex<Room>>;
@@ -47,9 +54,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .route("/ws", any(ws_handler))
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:8888").await?;
+    let listener = TcpListener::bind("0.0.0.0:8888").await?;
 
-    println!("listening at {}", listener.local_addr().unwrap());
+    println!("listening at {}", listener.local_addr()?);
     serve(listener, app).await?;
     Ok(())
 }
@@ -71,33 +78,44 @@ async fn handle_socket(socket: WebSocket, state: GameState) {
         if state.player_a.is_none() {
             (*state).player_a = Some(tx);
             id = 0;
-            dbg!("player_a connected..");
+            println!("player_a connected..");
         } else {
             (*state).player_b = Some(tx);
             id = 1;
-            dbg!("player_b connected..");
+            println!("player_b connected..");
         }
     }
 
-    while state.lock().await.get_buddy(id).is_none() {
+    let other = loop {
+        if let Some(other) = state.lock().await.get_buddy(id) {
+            break other.clone();
+        }
         sleep(Duration::from_millis(200)).await;
-    }
+    };
 
-    let other = state.lock().await.get_buddy(id).unwrap().clone();
-
-    let send_task = spawn(async move {
+    let mut send_task = spawn(async move {
         loop {
             let msg = rx.recv().await.unwrap();
             sender.send(msg).await.unwrap();
         }
     });
 
-    let recv_task = spawn(async move {
+    let mut recv_task = spawn(async move {
         loop {
             let msg = receiver.next().await.unwrap().unwrap();
             other.send(msg).await.unwrap();
         }
     });
 
-    let _ = join!(send_task, recv_task);
+    select!(
+        _ = &mut send_task => {
+            recv_task.abort();
+        },
+        _ = &mut recv_task => {
+            send_task.abort();
+        }
+    );
+
+    let mut state = state.lock().await;
+    state.disconnect(id);
 }
